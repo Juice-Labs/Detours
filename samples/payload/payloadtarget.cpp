@@ -34,7 +34,7 @@ int main()
     hParent = *static_cast<HANDLE*>(payloadAddr);
 
     DWORD randomPayloadSize;
-    void* randomPayload = DetourFindRemotePayload(hParent, RANDOM_DATA_PAYLOAD, &randomPayloadSize);
+    void* randomPayload = (void*)DetourFindRemotePayload(hParent, RANDOM_DATA_PAYLOAD, &randomPayloadSize);
     if (!randomPayload || randomPayloadSize != sizeof(random_payload_t))
     {
         HandleApiFailure("DetourFindRemotePayload");

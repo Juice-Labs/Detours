@@ -630,7 +630,7 @@ TEST_CASE("DetourCopyPayloadToProcessEx", "[module]")
     {
         const auto ptr = DetourCopyPayloadToProcessEx(NULL, guid, &data, sizeof(data));
         REQUIRE(GetLastError() == ERROR_INVALID_HANDLE);
-        REQUIRE(ptr == nullptr);
+        REQUIRE((void*)ptr == nullptr);
     }
 
     SECTION("Writing to own process, results in valid pointer")
@@ -648,10 +648,10 @@ TEST_CASE("DetourCopyPayloadToProcessEx", "[module]")
 
         const auto ptr = DetourCopyPayloadToProcessEx(process.information.hProcess, guid, &data, sizeof(data));
         REQUIRE(GetLastError() == NO_ERROR);
-        REQUIRE(ptr != nullptr);
+        REQUIRE((void*)ptr != nullptr);
 
         std::uint32_t retrieved_data{};
-        REQUIRE(ReadProcessMemory(process.information.hProcess, ptr, &retrieved_data, sizeof(retrieved_data), nullptr));
+        REQUIRE(ReadProcessMemory(process.information.hProcess, (LPCVOID)ptr, &retrieved_data, sizeof(retrieved_data), nullptr));
         REQUIRE(retrieved_data == data);
     }
 }
@@ -662,7 +662,7 @@ TEST_CASE("DetourFindRemotePayload", "[module]")
     {
         const auto ptr = DetourFindRemotePayload(NULL, TEST_PAYLOAD_GUID, nullptr);
         REQUIRE(GetLastError() == ERROR_INVALID_HANDLE);
-        REQUIRE(ptr == nullptr);
+        REQUIRE((void*)ptr == nullptr);
     }
 
     SECTION("Finding null GUID from own process, results in error")
@@ -671,7 +671,7 @@ TEST_CASE("DetourFindRemotePayload", "[module]")
 
         const auto ptr = DetourFindRemotePayload(GetCurrentProcess(), guid, nullptr);
         REQUIRE(GetLastError() == ERROR_MOD_NOT_FOUND);
-        REQUIRE(ptr == nullptr);
+        REQUIRE((void*)ptr == nullptr);
     }
 
     SECTION("Finding null GUID from different process, results in error")
@@ -683,7 +683,7 @@ TEST_CASE("DetourFindRemotePayload", "[module]")
         const GUID guid{};
         const auto ptr = DetourFindRemotePayload(process.information.hProcess, guid, nullptr);
         REQUIRE(GetLastError() == ERROR_MOD_NOT_FOUND);
-        REQUIRE(ptr == nullptr);
+        REQUIRE((void*)ptr == nullptr);
     }
 
     SECTION("Finding valid GUID from own process, results in valid pointer")
@@ -707,12 +707,12 @@ TEST_CASE("DetourFindRemotePayload", "[module]")
         DWORD size = 0;
         const auto ptr = DetourFindRemotePayload(process.information.hProcess, TEST_PAYLOAD_GUID, &size);
         REQUIRE(GetLastError() == NO_ERROR);
-        REQUIRE(ptr != nullptr);
+        REQUIRE((void*)ptr != nullptr);
         REQUIRE(size == TEST_PAYLOAD_SIZE);
 
         SIZE_T bytesRead = 0;
         char szPayloadMessage[TEST_PAYLOAD_SIZE];
-        REQUIRE(ReadProcessMemory(process.information.hProcess, ptr, &szPayloadMessage, TEST_PAYLOAD_SIZE, &bytesRead));
+        REQUIRE(ReadProcessMemory(process.information.hProcess, (LPCVOID)ptr, &szPayloadMessage, TEST_PAYLOAD_SIZE, &bytesRead));
         REQUIRE(bytesRead == TEST_PAYLOAD_SIZE);
         REQUIRE_THAT(szPayloadMessage, Catch::Matchers::Contains("123"));
     }

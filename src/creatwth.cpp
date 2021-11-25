@@ -34,16 +34,18 @@ static BOOL WINAPI DetourVirtualProtectSameExecuteEx64(_In_  HANDLE hProcess,
     // This function is meant to be a drop-in replacement for some uses of VirtualProtectEx.
     // When "restoring" page protection, there is no need to use this function.
 {
+    using namespace yapi_dt;
+
     MEMORY_BASIC_INFORMATION64 mbi;
 
     // Query to get existing execute access.
 
     ZeroMemory(&mbi, sizeof(mbi));
 
-    if (yapi_dt::VirtualQueryEx64(hProcess, pAddress, &mbi, sizeof(mbi)) == 0) {
+    if (VirtualQueryEx64(hProcess, pAddress, &mbi, sizeof(mbi)) == 0) {
         return FALSE;
     }
-    return yapi_dt::VirtualProtectEx64(hProcess, pAddress, nSize,
+    return VirtualProtectEx64(hProcess, pAddress, nSize,
         DetourPageProtectAdjustExecute(mbi.Protect, dwNewProtect),
         pdwOldProtect);
 }
@@ -62,6 +64,8 @@ static DWORD64 WINAPI LoadNtHeaderFromProcess(HANDLE hProcess,
                                            DWORD64 hModule,
                                            PIMAGE_NT_HEADERS32 pNtHeader)
 {
+    using namespace yapi_dt;
+
     ZeroMemory(pNtHeader, sizeof(*pNtHeader));
     DWORD64 pbModule = (DWORD64)hModule;
 
@@ -73,13 +77,13 @@ static DWORD64 WINAPI LoadNtHeaderFromProcess(HANDLE hProcess,
     MEMORY_BASIC_INFORMATION64 mbi;
     ZeroMemory(&mbi, sizeof(mbi));
 
-    if (yapi_dt::VirtualQueryEx64(hProcess, (DWORD64)hModule, &mbi, sizeof(mbi)) == 0) {
+    if (VirtualQueryEx64(hProcess, hModule, &mbi, sizeof(mbi)) == 0) {
         return NULL;
     }
 
     IMAGE_DOS_HEADER idh;
 
-    if (!yapi_dt::ReadProcessMemory64(hProcess, (DWORD64)pbModule, &idh, sizeof(idh), NULL)) {
+    if (!ReadProcessMemory64(hProcess, pbModule, &idh, sizeof(idh), NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %d\n",
                       pbModule, pbModule + sizeof(idh), GetLastError()));
         return NULL;
@@ -93,7 +97,7 @@ static DWORD64 WINAPI LoadNtHeaderFromProcess(HANDLE hProcess,
         return NULL;
     }
 
-    if (!yapi_dt::ReadProcessMemory64(hProcess, (DWORD64)(pbModule + idh.e_lfanew),
+    if (!ReadProcessMemory64(hProcess, (pbModule + idh.e_lfanew),
                            pNtHeader, sizeof(*pNtHeader), NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p:%p) failed: %lu\n",
                       pbModule + idh.e_lfanew,
@@ -114,8 +118,10 @@ static DWORD64 WINAPI LoadNtHeaderFromProcess(HANDLE hProcess,
 static DWORD64 WINAPI EnumerateModulesInProcess(_In_ HANDLE hProcess,
                                                 _In_opt_ DWORD64 hModuleLast,
                                                 _Out_ PIMAGE_NT_HEADERS32 pNtHeader,
-_Out_opt_ PVOID *pRemoteNtHeader)
+                                                _Out_opt_ DWORD64 *pRemoteNtHeader)
 {
+    using namespace yapi_dt;
+
     ZeroMemory(pNtHeader, sizeof(*pNtHeader));
     if (pRemoteNtHeader) {
         *pRemoteNtHeader = NULL;
@@ -131,7 +137,7 @@ _Out_opt_ PVOID *pRemoteNtHeader)
 
     for (;; pbLast = (DWORD64)mbi.BaseAddress + mbi.RegionSize) {
         DWORD64 pbLastAddr = (DWORD64)pbLast;
-        if (yapi_dt::VirtualQueryEx64(hProcess, pbLastAddr, &mbi, sizeof(mbi)) == 0) {
+        if (VirtualQueryEx64(hProcess, pbLastAddr, &mbi, sizeof(mbi)) == 0) {
             break;
         }
 
@@ -153,13 +159,13 @@ _Out_opt_ PVOID *pRemoteNtHeader)
             continue;
         }
 
-        PVOID remoteHeader = LoadNtHeaderFromProcess(hProcess, (DWORD64)pbLast, pNtHeader);
+        DWORD64 remoteHeader = LoadNtHeaderFromProcess(hProcess, pbLast, pNtHeader);
         if (remoteHeader) {
             if (pRemoteNtHeader) {
                 *pRemoteNtHeader = remoteHeader;
             }
 
-            return (DWORD64)pbLast;
+            return pbLast;
         }
     }
     return NULL;
@@ -170,10 +176,10 @@ _Out_opt_ PVOID *pRemoteNtHeader)
 // Find payloads in target process.
 //
 
-static PVOID FindDetourSectionInRemoteModule(_In_ HANDLE hProcess,
-                                             _In_ HMODULE hModule,
+static DWORD64 FindDetourSectionInRemoteModule(_In_ HANDLE hProcess,
+                                             _In_ DWORD64 hModule,
                                              _In_ const IMAGE_NT_HEADERS32 *pNtHeader,
-                                             _In_ PVOID pRemoteNtHeader)
+                                             _In_ DWORD64 pRemoteNtHeader)
 {
     if (pNtHeader->FileHeader.SizeOfOptionalHeader == 0) {
         SetLastError(ERROR_EXE_MARKED_INVALID);
@@ -205,7 +211,7 @@ static PVOID FindDetourSectionInRemoteModule(_In_ HANDLE hProcess,
             }
 
             SetLastError(NO_ERROR);
-            return (PBYTE)hModule + header.VirtualAddress;
+            return (DWORD64)hModule + header.VirtualAddress;
         }
     }
 
@@ -213,10 +219,10 @@ static PVOID FindDetourSectionInRemoteModule(_In_ HANDLE hProcess,
     return NULL;
 }
 
-static PVOID FindPayloadInRemoteDetourSection(_In_ HANDLE hProcess,
+static DWORD64 FindPayloadInRemoteDetourSection(_In_ HANDLE hProcess,
                                                _In_ REFGUID rguid,
                                                _Out_opt_ DWORD *pcbData,
-                                               _In_ PVOID pvRemoteDetoursSection)
+                                               _In_ DWORD64 pvRemoteDetoursSection)
 {
     if (pcbData) {
         *pcbData = 0;
@@ -258,7 +264,7 @@ static PVOID FindPayloadInRemoteDetourSection(_In_ HANDLE hProcess,
                 *pcbData = section.cbBytes - sizeof(section);
             }
             SetLastError(NO_ERROR);
-            return (DETOUR_SECTION_RECORD *)pvSection + 1;
+            return (DWORD64)((DETOUR_SECTION_RECORD *)pvSection + 1);
         }
 
         pvSection = (PBYTE)pvSection + section.cbBytes;
@@ -268,7 +274,7 @@ static PVOID FindPayloadInRemoteDetourSection(_In_ HANDLE hProcess,
 }
 
 _Success_(return != NULL)
-PVOID WINAPI DetourFindRemotePayload(_In_ HANDLE hProcess,
+DWORD64 WINAPI DetourFindRemotePayload(_In_ HANDLE hProcess,
                                      _In_ REFGUID rguid,
                                      _Out_opt_ DWORD *pcbData)
 {
@@ -278,9 +284,9 @@ PVOID WINAPI DetourFindRemotePayload(_In_ HANDLE hProcess,
     }
 
     IMAGE_NT_HEADERS32 header;
-    PVOID pvRemoteHeader;
-    for (HMODULE hMod = NULL; (hMod = EnumerateModulesInProcess(hProcess, hMod, &header, &pvRemoteHeader)) != NULL;) {
-        PVOID pvData = FindDetourSectionInRemoteModule(hProcess, hMod, &header, pvRemoteHeader);
+    DWORD64 pvRemoteHeader;
+    for (DWORD64 hMod = NULL; (hMod = EnumerateModulesInProcess(hProcess, hMod, &header, &pvRemoteHeader)) != NULL;) {
+        DWORD64 pvData = FindDetourSectionInRemoteModule(hProcess, hMod, &header, pvRemoteHeader);
         if (pvData != NULL) {
             pvData = FindPayloadInRemoteDetourSection(hProcess, rguid, pcbData, pvData);
             if (pvData != NULL) {
@@ -299,6 +305,8 @@ PVOID WINAPI DetourFindRemotePayload(_In_ HANDLE hProcess,
 //
 static DWORD64 FindAndAllocateNearBase64(HANDLE hProcess, DWORD64 pbModule, DWORD64 pbBase, DWORD cbAlloc)
 {
+    using namespace yapi_dt;
+
     MEMORY_BASIC_INFORMATION64 mbi;
     ZeroMemory(&mbi, sizeof(mbi));
 
@@ -306,7 +314,7 @@ static DWORD64 FindAndAllocateNearBase64(HANDLE hProcess, DWORD64 pbModule, DWOR
     for (;; pbLast = (DWORD64)mbi.BaseAddress + mbi.RegionSize) {
 
         ZeroMemory(&mbi, sizeof(mbi));
-        if (yapi_dt::VirtualQueryEx64(hProcess, (DWORD64)pbLast, &mbi, sizeof(mbi)) == 0) {
+        if (VirtualQueryEx64(hProcess, pbLast, &mbi, sizeof(mbi)) == 0) {
             if (GetLastError() == ERROR_INVALID_PARAMETER) {
                 break;
             }
@@ -348,7 +356,7 @@ static DWORD64 FindAndAllocateNearBase64(HANDLE hProcess, DWORD64 pbModule, DWOR
                       (DWORD64)mbi.BaseAddress + mbi.RegionSize));
 
         for (; pbAddress < (DWORD64)mbi.BaseAddress + mbi.RegionSize; pbAddress += MM_ALLOCATION_GRANULARITY) {
-            DWORD64 pbAlloc = (DWORD64)yapi_dt::VirtualAllocEx64(hProcess, pbAddress, cbAlloc,
+            DWORD64 pbAlloc = (DWORD64)VirtualAllocEx64(hProcess, pbAddress, cbAlloc,
                                                   MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
             if (pbAlloc == NULL) {
                 DETOUR_TRACE(("VirtualAllocEx(%p) failed: %lu\n", pbAddress, GetLastError()));
@@ -454,13 +462,14 @@ static inline HRESULT ReplaceOptionalSizeA(_Inout_z_count_(cchDest) LPSTR pszDes
 
 static BOOL RecordExeRestore(HANDLE hProcess, DWORD64 hModule, DETOUR_EXE_RESTORE& der)
 {
+    using namespace yapi_dt;
     // Save the various headers for DetourRestoreAfterWith.
     ZeroMemory(&der, sizeof(der));
     der.cb = sizeof(der);
 
     der.pidh = hModule;
     der.cbidh = sizeof(der.idh);
-    if (!yapi_dt::ReadProcessMemory64(hProcess, der.pidh, &der.idh, sizeof(der.idh), NULL)) {
+    if (!ReadProcessMemory64(hProcess, der.pidh, &der.idh, sizeof(der.idh), NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %lu\n",
                       der.pidh, der.pidh + der.cbidh, GetLastError()));
         return FALSE;
@@ -471,7 +480,7 @@ static BOOL RecordExeRestore(HANDLE hProcess, DWORD64 hModule, DETOUR_EXE_RESTOR
     // First we read just the Signature and FileHeader.
     der.pinh = der.pidh + der.idh.e_lfanew;
     der.cbinh = FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader);
-    if (!yapi_dt::ReadProcessMemory64(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
+    if (!ReadProcessMemory64(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p) failed: %lu\n",
                       der.pinh, der.pinh + der.cbinh, GetLastError()));
         return FALSE;
@@ -486,7 +495,7 @@ static BOOL RecordExeRestore(HANDLE hProcess, DWORD64 hModule, DETOUR_EXE_RESTOR
         return FALSE;
     }
 
-    if (!yapi_dt::ReadProcessMemory64(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
+    if (!ReadProcessMemory64(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p) failed: %lu\n",
                       der.pinh, der.pinh + der.cbinh, GetLastError()));
         return FALSE;
@@ -520,7 +529,7 @@ static BOOL RecordExeRestore(HANDLE hProcess, DWORD64 hModule, DETOUR_EXE_RESTOR
 
     if (der.pclr != 0) {
         der.cbclr = sizeof(der.clr);
-        if (!yapi_dt::ReadProcessMemory64(hProcess, der.pclr, &der.clr, der.cbclr, NULL)) {
+        if (!ReadProcessMemory64(hProcess, der.pclr, &der.clr, der.cbclr, NULL)) {
             DETOUR_TRACE(("ReadProcessMemory(clr@%p..%p) failed: %lu\n",
                           der.pclr, der.pclr + der.cbclr, GetLastError()));
             return FALSE;
@@ -531,69 +540,11 @@ static BOOL RecordExeRestore(HANDLE hProcess, DWORD64 hModule, DETOUR_EXE_RESTOR
     return TRUE;
 }
 
-//////////////////////////////////////////////////////////////////////////////
-//
-#if DETOURS_32BIT
-#define DWORD_XX                        DWORD32
-#define IMAGE_NT_HEADERS_XX             IMAGE_NT_HEADERS32
-#define IMAGE_NT_OPTIONAL_HDR_MAGIC_XX  IMAGE_NT_OPTIONAL_HDR32_MAGIC
-#define IMAGE_ORDINAL_FLAG_XX           IMAGE_ORDINAL_FLAG32
-#define IMAGE_THUNK_DATAXX              IMAGE_THUNK_DATA32
-#define UPDATE_IMPORTS_XX               UpdateImports32_Old
-#define DETOURS_BITS_XX                 32
-#include "uimports.cpp"
-#undef DETOUR_EXE_RESTORE_FIELD_XX
-#undef DWORD_XX
-#undef IMAGE_NT_HEADERS_XX
-#undef IMAGE_NT_OPTIONAL_HDR_MAGIC_XX
-#undef IMAGE_ORDINAL_FLAG_XX
-#undef IMAGE_THUNK_DATAXX
-#undef UPDATE_IMPORTS_XX
-#undef DETOURS_BITS_XX
-#endif // DETOURS_32BIT
-
-#if DETOURS_64BIT
-
-#define DWORD_XX                        DWORD32
-#define IMAGE_NT_HEADERS_XX             IMAGE_NT_HEADERS32
-#define IMAGE_NT_OPTIONAL_HDR_MAGIC_XX  IMAGE_NT_OPTIONAL_HDR32_MAGIC
-#define IMAGE_ORDINAL_FLAG_XX           IMAGE_ORDINAL_FLAG32
-#define IMAGE_THUNK_DATAXX              IMAGE_THUNK_DATA32
-#define UPDATE_IMPORTS_XX               UpdateImports32
-#define DETOURS_BITS_XX                 32
-#include "uimports.cpp"
-#undef DETOUR_EXE_RESTORE_FIELD_XX
-#undef DWORD_XX
-#undef IMAGE_NT_HEADERS_XX
-#undef IMAGE_NT_OPTIONAL_HDR_MAGIC_XX
-#undef IMAGE_ORDINAL_FLAG_XX
-#undef IMAGE_THUNK_DATAXX
-#undef UPDATE_IMPORTS_XX
-#undef DETOURS_BITS_XX
-
-#define DWORD_XX                        DWORD64
-#define IMAGE_NT_HEADERS_XX             IMAGE_NT_HEADERS64
-#define IMAGE_NT_OPTIONAL_HDR_MAGIC_XX  IMAGE_NT_OPTIONAL_HDR64_MAGIC
-#define IMAGE_ORDINAL_FLAG_XX           IMAGE_ORDINAL_FLAG64
-#define IMAGE_THUNK_DATAXX           	  IMAGE_THUNK_DATA64
-#define UPDATE_IMPORTS_XX               UpdateImports64_Old
-#define DETOURS_BITS_XX                 64
-#include "uimports.cpp"
-#undef DETOUR_EXE_RESTORE_FIELD_XX
-#undef DWORD_XX
-#undef IMAGE_NT_HEADERS_XX
-#undef IMAGE_NT_OPTIONAL_HDR_MAGIC_XX
-#undef IMAGE_ORDINAL_FLAG_XX
-#undef UPDATE_IMPORTS_XX
-#endif // DETOURS_64BIT
-
-//////////////////////////////////////////////////////////////////////////////
-//
 #if DETOURS_64BIT
 
 C_ASSERT(sizeof(IMAGE_NT_HEADERS64) == sizeof(IMAGE_NT_HEADERS32) + 16);
 
-static BOOL UpdateFrom32To64(HANDLE hProcess, HMODULE hModule, WORD machine,
+static BOOL UpdateFrom32To64(HANDLE hProcess, DWORD64 hModule, WORD machine,
                              DETOUR_EXE_RESTORE& der)
 {
     IMAGE_DOS_HEADER idh;
@@ -737,7 +688,7 @@ static BOOL UpdateFrom32To64(HANDLE hProcess, HMODULE hModule, WORD machine,
 #endif // DETOURS_64BIT
 
 static BOOL UpdateImports32(HANDLE hProcess,
-    HMODULE hModule,
+    DWORD64 hModule,
     __in_ecount(nDlls) LPCSTR* plpDlls,
     DWORD nDlls)
 {
@@ -871,7 +822,7 @@ static BOOL UpdateImports32(HANDLE hProcess,
     }
 
     PIMAGE_IMPORT_DESCRIPTOR piid = (PIMAGE_IMPORT_DESCRIPTOR)pbNew;
-    IMAGE_THUNK_DATAXX* pt = NULL;
+    IMAGE_THUNK_DATA32* pt = NULL;
 
     DWORD obBase = (DWORD)(pbNewIid - pbModule);
     DWORD dwProtect = 0;
@@ -901,7 +852,7 @@ static BOOL UpdateImports32(HANDLE hProcess,
         // After copying the string, we patch up the size "??" bits if any.
         hrRet = ReplaceOptionalSizeA((char*)pbNew + obStr,
             cbNew - obStr,
-            DETOURS_STRINGIFY(DETOURS_BITS_XX));
+            DETOURS_STRINGIFY(32));
         if (FAILED(hrRet)) {
             DETOUR_TRACE(("ReplaceOptionalSizeA failed: %d\n", GetLastError()));
             goto finish;
@@ -912,13 +863,13 @@ static BOOL UpdateImports32(HANDLE hProcess,
 
         // We need 2 thunks for the import table and 2 thunks for the IAT.
         // One for an ordinal import and one to mark the end of the list.
-        pt = ((IMAGE_THUNK_DATAXX*)(pbNew + nOffset));
+        pt = ((IMAGE_THUNK_DATA32*)(pbNew + nOffset));
         pt[0].u1.Ordinal = IMAGE_ORDINAL_FLAG32 + 1;
         pt[1].u1.Ordinal = 0;
 
         nOffset = obTab + (sizeof(IMAGE_THUNK_DATA32) * ((4 * n) + 2));
         piid[n].FirstThunk = obBase + nOffset;
-        pt = ((IMAGE_THUNK_DATAXX*)(pbNew + nOffset));
+        pt = ((IMAGE_THUNK_DATA32*)(pbNew + nOffset));
         pt[0].u1.Ordinal = IMAGE_ORDINAL_FLAG32 + 1;
         pt[1].u1.Ordinal = 0;
         piid[n].TimeDateStamp = 0;
@@ -1005,6 +956,8 @@ static BOOL UpdateImports64(HANDLE hProcess,
     __in_ecount(nDlls) LPCSTR* plpDlls,
     DWORD nDlls)
 {
+    using namespace yapi_dt;
+
     BOOL fSucceeded = FALSE;
     DWORD64 cbNew = 0;
 
@@ -1017,7 +970,7 @@ static BOOL UpdateImports64(HANDLE hProcess,
 
     IMAGE_DOS_HEADER idh;
     ZeroMemory(&idh, sizeof(idh));
-    if (!yapi_dt::ReadProcessMemory64(hProcess, pbModule, &idh, sizeof(idh), &cbRead)
+    if (!ReadProcessMemory64(hProcess, pbModule, &idh, sizeof(idh), &cbRead)
         || cbRead < sizeof(idh)) {
 
         DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %d\n",
@@ -1034,7 +987,7 @@ static BOOL UpdateImports64(HANDLE hProcess,
     IMAGE_NT_HEADERS64 inh;
     ZeroMemory(&inh, sizeof(inh));
 
-    if (!yapi_dt::ReadProcessMemory64(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), &cbRead)
+    if (!ReadProcessMemory64(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), &cbRead)
         || cbRead < sizeof(inh)) {
         DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p) failed: %d\n",
             pbModule + idh.e_lfanew,
@@ -1063,7 +1016,7 @@ static BOOL UpdateImports64(HANDLE hProcess,
         IMAGE_SECTION_HEADER ish;
         ZeroMemory(&ish, sizeof(ish));
 
-        if (!yapi_dt::ReadProcessMemory64(hProcess, pbModule + dwSec + sizeof(ish) * i, &ish,
+        if (!ReadProcessMemory64(hProcess, pbModule + dwSec + sizeof(ish) * i, &ish,
             sizeof(ish), &cbRead)
             || cbRead < sizeof(ish)) {
 
@@ -1144,7 +1097,7 @@ static BOOL UpdateImports64(HANDLE hProcess,
         // Read the old import directory if it exists.
         DETOUR_TRACE(("IMPORT_DIRECTORY perms=%x\n", dwProtect));
 
-        if (!yapi_dt::ReadProcessMemory64(hProcess,
+        if (!ReadProcessMemory64(hProcess,
             pbModule + inh.IMPORT_DIRECTORY.VirtualAddress,
             &piid[nDlls],
             nOldDlls * sizeof(IMAGE_IMPORT_DESCRIPTOR), &cbRead)
@@ -1165,7 +1118,7 @@ static BOOL UpdateImports64(HANDLE hProcess,
         // After copying the string, we patch up the size "??" bits if any.
         hrRet = ReplaceOptionalSizeA((char*)pbNew + obStr,
             cbNew - obStr,
-            DETOURS_STRINGIFY(DETOURS_BITS_XX));
+            DETOURS_STRINGIFY(64));
         if (FAILED(hrRet)) {
             DETOUR_TRACE(("ReplaceOptionalSizeA failed: %d\n", GetLastError()));
             goto finish;
@@ -1208,7 +1161,7 @@ static BOOL UpdateImports64(HANDLE hProcess,
     }
 #endif
 
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbNewIid, pbNew, obStr, NULL)) {
+    if (!WriteProcessMemory64(hProcess, pbNewIid, pbNew, obStr, NULL)) {
         DETOUR_TRACE(("WriteProcessMemory(iid) failed: %d\n", GetLastError()));
         goto finish;
     }
@@ -1240,13 +1193,13 @@ static BOOL UpdateImports64(HANDLE hProcess,
 
     inh.OptionalHeader.CheckSum = 0;
 
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbModule, &idh, sizeof(idh), NULL)) {
+    if (!WriteProcessMemory64(hProcess, pbModule, &idh, sizeof(idh), NULL)) {
         DETOUR_TRACE(("WriteProcessMemory(idh) failed: %d\n", GetLastError()));
         goto finish;
     }
     DETOUR_TRACE(("WriteProcessMemory(idh:%p..%p)\n", pbModule, pbModule + sizeof(idh)));
 
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), NULL)) {
+    if (!WriteProcessMemory64(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), NULL)) {
         DETOUR_TRACE(("WriteProcessMemory(inh) failed: %d\n", GetLastError()));
         goto finish;
     }
@@ -1254,7 +1207,7 @@ static BOOL UpdateImports64(HANDLE hProcess,
         pbModule + idh.e_lfanew,
         pbModule + idh.e_lfanew + sizeof(inh)));
 
-    if (!yapi_dt::VirtualProtectEx64(hProcess, pbModule, inh.OptionalHeader.SizeOfHeaders,
+    if (!VirtualProtectEx64(hProcess, pbModule, inh.OptionalHeader.SizeOfHeaders,
         dwProtect, &dwProtect)) {
         DETOUR_TRACE(("VirtualProtectEx(idh) restore failed: %d\n", GetLastError()));
         goto finish;
@@ -1377,6 +1330,8 @@ BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
                                          _In_reads_(nDlls) LPCSTR *rlpDlls,
                                          _In_ DWORD nDlls)
 {
+    using namespace yapi_dt;
+
     // Find the next memory region that contains a mapped PE image.
     //
     BOOL bIs32BitExe = FALSE;
@@ -1444,15 +1399,15 @@ BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
 #if defined(DETOURS_32BIT)
     if (bIs32BitProcess) {
         // 32-bit native or 32-bit managed process on any platform.
-        if (!UpdateImports32(hProcess, (HMODULE)hModule, rlpDlls, nDlls)) {
+        if (!UpdateImports32(hProcess, hModule, rlpDlls, nDlls)) {
             return FALSE;
         }
     }
     else {
         // 32-bit native or 32-bit managed process on any platform.
         if (!UpdateImports64(hProcess, hModule, rlpDlls, nDlls)) {
-        return FALSE;
-    }
+            return FALSE;
+        }
     }
 #elif defined(DETOURS_64BIT)
     if (bIs32BitProcess) {
@@ -1490,12 +1445,12 @@ BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
             return FALSE;
         }
 
-        if (!yapi_dt::WriteProcessMemory64(hProcess, der.pclr, &clr, sizeof(clr), NULL)) {
+        if (!WriteProcessMemory64(hProcess, der.pclr, &clr, sizeof(clr), NULL)) {
             DETOUR_TRACE(("WriteProcessMemory(clr) failed: %lu\n", GetLastError()));
             return FALSE;
         }
 
-        if (!yapi_dt::VirtualProtectEx64(hProcess, der.pclr, sizeof(clr), dwProtect, &dwProtect)) {
+        if (!VirtualProtectEx64(hProcess, der.pclr, sizeof(clr), dwProtect, &dwProtect)) {
             DETOUR_TRACE(("VirtualProtectEx(clr) restore failed: %lu\n", GetLastError()));
             return FALSE;
         }
@@ -1512,12 +1467,14 @@ BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
 #endif // DETOURS_64BIT
     }
 
+#if 0
     //////////////////////////////// Save the undo data to the target process.
     //
     if (!DetourCopyPayloadToProcess(hProcess, DETOUR_EXE_RESTORE_GUID, &der, sizeof(der))) {
         DETOUR_TRACE(("DetourCopyPayloadToProcess failed: %lu\n", GetLastError()));
         return FALSE;
     }
+#endif
     return TRUE;
 }
 
@@ -1646,11 +1603,13 @@ BOOL WINAPI DetourCopyPayloadToProcess(_In_ HANDLE hProcess,
 }
 
 _Success_(return != NULL)
-PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
+DWORD64 WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
                                           _In_ REFGUID rguid,
                                           _In_reads_bytes_(cbData) LPCVOID pvData,
                                           _In_ DWORD cbData)
 {
+    using namespace yapi_dt;
+
     if (hProcess == NULL) {
         SetLastError(ERROR_INVALID_HANDLE);
         return NULL;
@@ -1663,7 +1622,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
                      sizeof(DETOUR_SECTION_RECORD) +
                      cbData);
 
-    DWORD64 pbBase = (DWORD64)yapi_dt::VirtualAllocEx64(hProcess, NULL, cbTotal,
+    DWORD64 pbBase = (DWORD64)VirtualAllocEx64(hProcess, NULL, cbTotal,
                                          MEM_COMMIT, PAGE_READWRITE);
     if (pbBase == NULL) {
         DETOUR_TRACE(("VirtualAllocEx(%lu) failed: %lu\n", cbTotal, GetLastError()));
@@ -1686,7 +1645,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     ZeroMemory(&idh, sizeof(idh));
     idh.e_magic = IMAGE_DOS_SIGNATURE;
     idh.e_lfanew = sizeof(idh);
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &idh, sizeof(idh), &cbWrote) ||
+    if (!WriteProcessMemory64(hProcess, pbTarget, &idh, sizeof(idh), &cbWrote) ||
         cbWrote != sizeof(idh)) {
         DETOUR_TRACE(("WriteProcessMemory(idh) failed: %lu\n", GetLastError()));
         return NULL;
@@ -1699,7 +1658,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     inh.FileHeader.Characteristics = IMAGE_FILE_DLL;
     inh.FileHeader.NumberOfSections = 1;
     inh.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR_MAGIC;
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &inh, sizeof(inh), &cbWrote) ||
+    if (!WriteProcessMemory64(hProcess, pbTarget, &inh, sizeof(inh), &cbWrote) ||
         cbWrote != sizeof(inh)) {
         return NULL;
     }
@@ -1711,7 +1670,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     ish.SizeOfRawData = (sizeof(DETOUR_SECTION_HEADER) +
                          sizeof(DETOUR_SECTION_RECORD) +
                          cbData);
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &ish, sizeof(ish), &cbWrote) ||
+    if (!WriteProcessMemory64(hProcess, pbTarget, &ish, sizeof(ish), &cbWrote) ||
         cbWrote != sizeof(ish)) {
         return NULL;
     }
@@ -1724,7 +1683,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     dsh.cbDataSize = (sizeof(DETOUR_SECTION_HEADER) +
                       sizeof(DETOUR_SECTION_RECORD) +
                       cbData);
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &dsh, sizeof(dsh), &cbWrote) ||
+    if (!WriteProcessMemory64(hProcess, pbTarget, &dsh, sizeof(dsh), &cbWrote) ||
         cbWrote != sizeof(dsh)) {
         return NULL;
     }
@@ -1734,13 +1693,13 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     dsr.cbBytes = cbData + sizeof(DETOUR_SECTION_RECORD);
     dsr.nReserved = 0;
     dsr.guid = rguid;
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &dsr, sizeof(dsr), &cbWrote) ||
+    if (!WriteProcessMemory64(hProcess, pbTarget, &dsr, sizeof(dsr), &cbWrote) ||
         cbWrote != sizeof(dsr)) {
         return NULL;
     }
     pbTarget += sizeof(dsr);
 
-    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, pvData, cbData, &cbWrote) ||
+    if (!WriteProcessMemory64(hProcess, pbTarget, (LPVOID)pvData, cbData, &cbWrote) ||
         cbWrote != cbData) {
         return NULL;
     }

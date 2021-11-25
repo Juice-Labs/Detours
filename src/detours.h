@@ -665,7 +665,7 @@ BOOL WINAPI DetourBinaryClose(_In_ PDETOUR_BINARY pBinary);
 /////////////////////////////////////////////////// Create Process & Load Dll.
 //
 _Success_(return != NULL)
-PVOID WINAPI DetourFindRemotePayload(_In_ HANDLE hProcess,
+DWORD64 WINAPI DetourFindRemotePayload(_In_ HANDLE hProcess,
                                      _In_ REFGUID rguid,
                                      _Out_opt_ DWORD *pcbData);
 
@@ -838,7 +838,7 @@ BOOL WINAPI DetourCopyPayloadToProcess(_In_ HANDLE hProcess,
                                        _In_reads_bytes_(cbData) LPCVOID pvData,
                                        _In_ DWORD cbData);
 _Success_(return != NULL)
-PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
+DWORD64 WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
                                           _In_ REFGUID rguid,
                                           _In_reads_bytes_(cbData) LPCVOID pvData,
                                           _In_ DWORD cbData);

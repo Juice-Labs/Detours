@@ -414,15 +414,15 @@ namespace yapi_dt {
 
 #ifdef _WIN64
 
-#define SetLastError64       SetLastError
-#define VirtualQueryEx64     VirtualQueryEx
-#define VirtualAllocEx64     VirtualAllocEx
-#define VirtualFreeEx64      VirtualFreeEx
-#define VirtualProtectEx64   VirtualProtectEx
-#define ReadProcessMemory64  ReadProcessMemory
-#define WriteProcessMemory64 WriteProcessMemory
-#define LoadLibrary64        LoadLibrary
-#define CreateRemoteThread64 CreateRemoteThread
+#define SetLastError64                  SetLastError
+#define VirtualQueryEx64(x,y,z,a)       VirtualQueryEx(x, (LPCVOID)(y), (PMEMORY_BASIC_INFORMATION)z, a)
+#define VirtualAllocEx64(x,y,z,a,b)     VirtualAllocEx(x, (LPVOID)(y), z, a, b)
+#define VirtualFreeEx64                 VirtualFreeEx
+#define VirtualProtectEx64(x,y,z,a,b)   VirtualProtectEx(x, (LPVOID)(y), z, a, b)
+#define ReadProcessMemory64(x,y,z,a,b)  ReadProcessMemory(x, (LPCVOID)(y), z, a, b)
+#define WriteProcessMemory64(x,y,z,a,b) WriteProcessMemory(x, (LPVOID)(y), z, a, b)
+#define LoadLibrary64                   LoadLibrary
+#define CreateRemoteThread64            CreateRemoteThread
 
 #else
 

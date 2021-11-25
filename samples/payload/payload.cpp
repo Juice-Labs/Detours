@@ -64,7 +64,7 @@ void StartChild()
 template<typename T>
 volatile T* InjectPayload(HANDLE hProcess, T payload, REFGUID guid)
 {
-    return static_cast<volatile T*>(
+    return (volatile T*)(
         DetourCopyPayloadToProcessEx(hProcess,guid, &payload, sizeof(payload)));
 }
 
