@@ -12,6 +12,8 @@
 #include "detours.h"
 #include <stddef.h>
 
+#include "yapi.hpp"
+
 #if DETOURS_VERSION != 0x4c0c1   // 0xMAJORcMINORcPATCH
 #error detours.h version mismatch
 #endif
@@ -20,6 +22,31 @@
 #define BOUND_DIRECTORY OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT]
 #define CLR_DIRECTORY OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR]
 #define IAT_DIRECTORY OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT]
+
+_Success_(return != FALSE)
+static BOOL WINAPI DetourVirtualProtectSameExecuteEx64(_In_  HANDLE hProcess,
+    _In_  DWORD64 pAddress,
+    _In_  SIZE_T nSize,
+    _In_  DWORD dwNewProtect,
+    _Out_ PDWORD pdwOldProtect)
+    // Some systems do not allow executability of a page to change. This function applies
+    // dwNewProtect to [pAddress, nSize), but preserving the previous executability.
+    // This function is meant to be a drop-in replacement for some uses of VirtualProtectEx.
+    // When "restoring" page protection, there is no need to use this function.
+{
+    MEMORY_BASIC_INFORMATION64 mbi;
+
+    // Query to get existing execute access.
+
+    ZeroMemory(&mbi, sizeof(mbi));
+
+    if (yapi_dt::VirtualQueryEx64(hProcess, pAddress, &mbi, sizeof(mbi)) == 0) {
+        return FALSE;
+    }
+    return yapi_dt::VirtualProtectEx64(hProcess, pAddress, nSize,
+        DetourPageProtectAdjustExecute(mbi.Protect, dwNewProtect),
+        pdwOldProtect);
+}
 
 //////////////////////////////////////////////////////////////////////////////
 //
@@ -31,28 +58,29 @@ const GUID DETOUR_EXE_HELPER_GUID = { /* ea0251b9-5cde-41b5-98d0-2af4a26b0fee */
 //
 // Enumerate through modules in the target process.
 //
-static PVOID LoadNtHeaderFromProcess(_In_ HANDLE hProcess,
-                                     _In_ HMODULE hModule,
-                                     _Out_ PIMAGE_NT_HEADERS32 pNtHeader)
+static DWORD64 WINAPI LoadNtHeaderFromProcess(HANDLE hProcess,
+                                           DWORD64 hModule,
+                                           PIMAGE_NT_HEADERS32 pNtHeader)
 {
     ZeroMemory(pNtHeader, sizeof(*pNtHeader));
-    PBYTE pbModule = (PBYTE)hModule;
+    DWORD64 pbModule = (DWORD64)hModule;
 
     if (pbModule == NULL) {
         SetLastError(ERROR_INVALID_PARAMETER);
         return NULL;
     }
 
-    MEMORY_BASIC_INFORMATION mbi;
+    MEMORY_BASIC_INFORMATION64 mbi;
     ZeroMemory(&mbi, sizeof(mbi));
 
-    if (VirtualQueryEx(hProcess, hModule, &mbi, sizeof(mbi)) == 0) {
+    if (yapi_dt::VirtualQueryEx64(hProcess, (DWORD64)hModule, &mbi, sizeof(mbi)) == 0) {
         return NULL;
     }
 
     IMAGE_DOS_HEADER idh;
-    if (!ReadProcessMemory(hProcess, pbModule, &idh, sizeof(idh), NULL)) {
-        DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %lu\n",
+
+    if (!yapi_dt::ReadProcessMemory64(hProcess, (DWORD64)pbModule, &idh, sizeof(idh), NULL)) {
+        DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %d\n",
                       pbModule, pbModule + sizeof(idh), GetLastError()));
         return NULL;
     }
@@ -65,7 +93,7 @@ static PVOID LoadNtHeaderFromProcess(_In_ HANDLE hProcess,
         return NULL;
     }
 
-    if (!ReadProcessMemory(hProcess, pbModule + idh.e_lfanew,
+    if (!yapi_dt::ReadProcessMemory64(hProcess, (DWORD64)(pbModule + idh.e_lfanew),
                            pNtHeader, sizeof(*pNtHeader), NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p:%p) failed: %lu\n",
                       pbModule + idh.e_lfanew,
@@ -83,26 +111,27 @@ static PVOID LoadNtHeaderFromProcess(_In_ HANDLE hProcess,
     return pbModule + idh.e_lfanew;
 }
 
-static HMODULE EnumerateModulesInProcess(_In_ HANDLE hProcess,
-                                         _In_opt_ HMODULE hModuleLast,
-                                         _Out_ PIMAGE_NT_HEADERS32 pNtHeader,
-                                         _Out_opt_ PVOID *pRemoteNtHeader)
+static DWORD64 WINAPI EnumerateModulesInProcess(_In_ HANDLE hProcess,
+                                                _In_opt_ DWORD64 hModuleLast,
+                                                _Out_ PIMAGE_NT_HEADERS32 pNtHeader,
+_Out_opt_ PVOID *pRemoteNtHeader)
 {
     ZeroMemory(pNtHeader, sizeof(*pNtHeader));
     if (pRemoteNtHeader) {
         *pRemoteNtHeader = NULL;
     }
 
-    PBYTE pbLast = (PBYTE)hModuleLast + MM_ALLOCATION_GRANULARITY;
+    DWORD64 pbLast = (DWORD64)hModuleLast + MM_ALLOCATION_GRANULARITY;
 
-    MEMORY_BASIC_INFORMATION mbi;
+    MEMORY_BASIC_INFORMATION64 mbi;
     ZeroMemory(&mbi, sizeof(mbi));
 
     // Find the next memory region that contains a mapped PE image.
     //
 
-    for (;; pbLast = (PBYTE)mbi.BaseAddress + mbi.RegionSize) {
-        if (VirtualQueryEx(hProcess, (PVOID)pbLast, &mbi, sizeof(mbi)) == 0) {
+    for (;; pbLast = (DWORD64)mbi.BaseAddress + mbi.RegionSize) {
+        DWORD64 pbLastAddr = (DWORD64)pbLast;
+        if (yapi_dt::VirtualQueryEx64(hProcess, pbLastAddr, &mbi, sizeof(mbi)) == 0) {
             break;
         }
 
@@ -112,7 +141,7 @@ static HMODULE EnumerateModulesInProcess(_In_ HANDLE hProcess,
         if ((mbi.RegionSize & 0xfff) == 0xfff) {
             break;
         }
-        if (((PBYTE)mbi.BaseAddress + mbi.RegionSize) < pbLast) {
+        if (((DWORD64)mbi.BaseAddress + mbi.RegionSize) < pbLast) {
             break;
         }
 
@@ -124,14 +153,13 @@ static HMODULE EnumerateModulesInProcess(_In_ HANDLE hProcess,
             continue;
         }
 
-        PVOID remoteHeader
-            = LoadNtHeaderFromProcess(hProcess, (HMODULE)pbLast, pNtHeader);
+        PVOID remoteHeader = LoadNtHeaderFromProcess(hProcess, (DWORD64)pbLast, pNtHeader);
         if (remoteHeader) {
             if (pRemoteNtHeader) {
                 *pRemoteNtHeader = remoteHeader;
             }
 
-            return (HMODULE)pbLast;
+            return (DWORD64)pbLast;
         }
     }
     return NULL;
@@ -269,16 +297,16 @@ PVOID WINAPI DetourFindRemotePayload(_In_ HANDLE hProcess,
 //
 // Find a region of memory in which we can create a replacement import table.
 //
-static PBYTE FindAndAllocateNearBase(HANDLE hProcess, PBYTE pbModule, PBYTE pbBase, DWORD cbAlloc)
+static DWORD64 FindAndAllocateNearBase64(HANDLE hProcess, DWORD64 pbModule, DWORD64 pbBase, DWORD cbAlloc)
 {
-    MEMORY_BASIC_INFORMATION mbi;
+    MEMORY_BASIC_INFORMATION64 mbi;
     ZeroMemory(&mbi, sizeof(mbi));
 
-    PBYTE pbLast = pbBase;
-    for (;; pbLast = (PBYTE)mbi.BaseAddress + mbi.RegionSize) {
+    DWORD64 pbLast = pbBase;
+    for (;; pbLast = (DWORD64)mbi.BaseAddress + mbi.RegionSize) {
 
         ZeroMemory(&mbi, sizeof(mbi));
-        if (VirtualQueryEx(hProcess, (PVOID)pbLast, &mbi, sizeof(mbi)) == 0) {
+        if (yapi_dt::VirtualQueryEx64(hProcess, (DWORD64)pbLast, &mbi, sizeof(mbi)) == 0) {
             if (GetLastError() == ERROR_INVALID_PARAMETER) {
                 break;
             }
@@ -300,43 +328,37 @@ static PBYTE FindAndAllocateNearBase(HANDLE hProcess, PBYTE pbModule, PBYTE pbBa
         }
 
         // Use the max of mbi.BaseAddress and pbBase, in case mbi.BaseAddress < pbBase.
-        PBYTE pbAddress = (PBYTE)mbi.BaseAddress > pbBase ? (PBYTE)mbi.BaseAddress : pbBase;
+        DWORD64 pbAddress = (DWORD64)mbi.BaseAddress > pbBase ? (DWORD64)mbi.BaseAddress : pbBase;
 
         // Round pbAddress up to the nearest MM allocation boundary.
-        const DWORD_PTR mmGranularityMinusOne = (DWORD_PTR)(MM_ALLOCATION_GRANULARITY -1);
-        pbAddress = (PBYTE)(((DWORD_PTR)pbAddress + mmGranularityMinusOne) & ~mmGranularityMinusOne);
+        const DWORD64 mmGranularityMinusOne = (DWORD64)(MM_ALLOCATION_GRANULARITY -1);
+        pbAddress = (DWORD64)(((DWORD64)pbAddress + mmGranularityMinusOne) & ~mmGranularityMinusOne);
 
-#ifdef _WIN64
         // The offset from pbModule to any replacement import must fit into 32 bits.
         // For simplicity, we check that the offset to the last byte fits into 32 bits,
         // instead of the largest offset we'll actually use. The values are very similar.
-        const size_t GB4 = ((((size_t)1) << 32) - 1);
+        const DWORD64 GB4 = ((((DWORD64)1) << 32) - 1);
         if ((size_t)(pbAddress + cbAlloc - 1 - pbModule) > GB4) {
             DETOUR_TRACE(("FindAndAllocateNearBase(1) failing due to distance >4GB %p\n", pbAddress));
             return NULL;
         }
-#else
-        UNREFERENCED_PARAMETER(pbModule);
-#endif
 
         DETOUR_TRACE(("Free region %p..%p\n",
                       mbi.BaseAddress,
-                      (PBYTE)mbi.BaseAddress + mbi.RegionSize));
+                      (DWORD64)mbi.BaseAddress + mbi.RegionSize));
 
-        for (; pbAddress < (PBYTE)mbi.BaseAddress + mbi.RegionSize; pbAddress += MM_ALLOCATION_GRANULARITY) {
-            PBYTE pbAlloc = (PBYTE)VirtualAllocEx(hProcess, pbAddress, cbAlloc,
+        for (; pbAddress < (DWORD64)mbi.BaseAddress + mbi.RegionSize; pbAddress += MM_ALLOCATION_GRANULARITY) {
+            DWORD64 pbAlloc = (DWORD64)yapi_dt::VirtualAllocEx64(hProcess, pbAddress, cbAlloc,
                                                   MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
             if (pbAlloc == NULL) {
                 DETOUR_TRACE(("VirtualAllocEx(%p) failed: %lu\n", pbAddress, GetLastError()));
                 continue;
             }
-#ifdef _WIN64
             // The offset from pbModule to any replacement import must fit into 32 bits.
             if ((size_t)(pbAddress + cbAlloc - 1 - pbModule) > GB4) {
                 DETOUR_TRACE(("FindAndAllocateNearBase(2) failing due to distance >4GB %p\n", pbAddress));
                 return NULL;
             }
-#endif
             DETOUR_TRACE(("[%p..%p] Allocated for import table.\n",
                           pbAlloc, pbAlloc + cbAlloc));
             return pbAlloc;
@@ -344,6 +366,59 @@ static PBYTE FindAndAllocateNearBase(HANDLE hProcess, PBYTE pbModule, PBYTE pbBa
     }
     return NULL;
 }
+
+static PBYTE FindAndAllocateNearBase32(HANDLE hProcess, PBYTE pbModule, PBYTE pbBase, DWORD cbAlloc)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    ZeroMemory(&mbi, sizeof(mbi));
+
+    PBYTE pbLast = pbBase;
+    for (;; pbLast = (PBYTE)mbi.BaseAddress + mbi.RegionSize) {
+
+        ZeroMemory(&mbi, sizeof(mbi));
+        if (VirtualQueryEx(hProcess, (PVOID)pbLast, &mbi, sizeof(mbi)) == 0) {
+            if (GetLastError() == ERROR_INVALID_PARAMETER) {
+                break;
+            }
+            DETOUR_TRACE(("VirtualQueryEx(%p) failed: %d\n",
+                pbLast, GetLastError()));
+            break;
+        }
+        // Usermode address space has such an unaligned region size always at the
+        // end and only at the end.
+        //
+        if ((mbi.RegionSize & 0xfff) == 0xfff) {
+            break;
+        }
+
+        // Skip anything other than a pure free region.
+        //
+        if (mbi.State != MEM_FREE) {
+            continue;
+        }
+
+        // Use the max of mbi.BaseAddress and pbBase, in case mbi.BaseAddress < pbBase.
+        PBYTE pbAddress = (PBYTE)mbi.BaseAddress > pbBase ? (PBYTE)mbi.BaseAddress : pbBase;
+
+        DETOUR_TRACE(("Free region %p..%p\n",
+            mbi.BaseAddress,
+            (DWORD64)mbi.BaseAddress + mbi.RegionSize));
+
+        for (; pbAddress < (PBYTE)mbi.BaseAddress + mbi.RegionSize; pbAddress += MM_ALLOCATION_GRANULARITY) {
+            PBYTE pbAlloc = (PBYTE)VirtualAllocEx(hProcess, pbAddress, cbAlloc,
+                MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (pbAlloc == NULL) {
+                DETOUR_TRACE(("VirtualAllocEx(%p) failed: %d\n", pbAddress, GetLastError()));
+                continue;
+            }
+            DETOUR_TRACE(("[%p..%p] Allocated for import table.\n",
+                pbAlloc, pbAlloc + cbAlloc));
+            return pbAlloc;
+        }
+    }
+    return NULL;
+}
+
 
 static inline DWORD PadToDword(DWORD dw)
 {
@@ -377,15 +452,15 @@ static inline HRESULT ReplaceOptionalSizeA(_Inout_z_count_(cchDest) LPSTR pszDes
     return S_OK;
 }
 
-static BOOL RecordExeRestore(HANDLE hProcess, HMODULE hModule, DETOUR_EXE_RESTORE& der)
+static BOOL RecordExeRestore(HANDLE hProcess, DWORD64 hModule, DETOUR_EXE_RESTORE& der)
 {
     // Save the various headers for DetourRestoreAfterWith.
     ZeroMemory(&der, sizeof(der));
     der.cb = sizeof(der);
 
-    der.pidh = (PBYTE)hModule;
+    der.pidh = hModule;
     der.cbidh = sizeof(der.idh);
-    if (!ReadProcessMemory(hProcess, der.pidh, &der.idh, sizeof(der.idh), NULL)) {
+    if (!yapi_dt::ReadProcessMemory64(hProcess, der.pidh, &der.idh, sizeof(der.idh), NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %lu\n",
                       der.pidh, der.pidh + der.cbidh, GetLastError()));
         return FALSE;
@@ -396,7 +471,7 @@ static BOOL RecordExeRestore(HANDLE hProcess, HMODULE hModule, DETOUR_EXE_RESTOR
     // First we read just the Signature and FileHeader.
     der.pinh = der.pidh + der.idh.e_lfanew;
     der.cbinh = FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader);
-    if (!ReadProcessMemory(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
+    if (!yapi_dt::ReadProcessMemory64(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p) failed: %lu\n",
                       der.pinh, der.pinh + der.cbinh, GetLastError()));
         return FALSE;
@@ -411,7 +486,7 @@ static BOOL RecordExeRestore(HANDLE hProcess, HMODULE hModule, DETOUR_EXE_RESTOR
         return FALSE;
     }
 
-    if (!ReadProcessMemory(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
+    if (!yapi_dt::ReadProcessMemory64(hProcess, der.pinh, &der.inh, der.cbinh, NULL)) {
         DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p) failed: %lu\n",
                       der.pinh, der.pinh + der.cbinh, GetLastError()));
         return FALSE;
@@ -428,7 +503,7 @@ static BOOL RecordExeRestore(HANDLE hProcess, HMODULE hModule, DETOUR_EXE_RESTOR
                           der.inh32.CLR_DIRECTORY.VirtualAddress,
                           der.inh32.CLR_DIRECTORY.Size));
 
-            der.pclr = ((PBYTE)hModule) + der.inh32.CLR_DIRECTORY.VirtualAddress;
+            der.pclr = (hModule) + der.inh32.CLR_DIRECTORY.VirtualAddress;
         }
     }
     else if (der.inh.OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
@@ -439,13 +514,13 @@ static BOOL RecordExeRestore(HANDLE hProcess, HMODULE hModule, DETOUR_EXE_RESTOR
                           der.inh64.CLR_DIRECTORY.VirtualAddress,
                           der.inh64.CLR_DIRECTORY.Size));
 
-            der.pclr = ((PBYTE)hModule) + der.inh64.CLR_DIRECTORY.VirtualAddress;
+            der.pclr = (hModule) + der.inh64.CLR_DIRECTORY.VirtualAddress;
         }
     }
 
     if (der.pclr != 0) {
         der.cbclr = sizeof(der.clr);
-        if (!ReadProcessMemory(hProcess, der.pclr, &der.clr, der.cbclr, NULL)) {
+        if (!yapi_dt::ReadProcessMemory64(hProcess, der.pclr, &der.clr, der.cbclr, NULL)) {
             DETOUR_TRACE(("ReadProcessMemory(clr@%p..%p) failed: %lu\n",
                           der.pclr, der.pclr + der.cbclr, GetLastError()));
             return FALSE;
@@ -464,7 +539,7 @@ static BOOL RecordExeRestore(HANDLE hProcess, HMODULE hModule, DETOUR_EXE_RESTOR
 #define IMAGE_NT_OPTIONAL_HDR_MAGIC_XX  IMAGE_NT_OPTIONAL_HDR32_MAGIC
 #define IMAGE_ORDINAL_FLAG_XX           IMAGE_ORDINAL_FLAG32
 #define IMAGE_THUNK_DATAXX              IMAGE_THUNK_DATA32
-#define UPDATE_IMPORTS_XX               UpdateImports32
+#define UPDATE_IMPORTS_XX               UpdateImports32_Old
 #define DETOURS_BITS_XX                 32
 #include "uimports.cpp"
 #undef DETOUR_EXE_RESTORE_FIELD_XX
@@ -500,8 +575,8 @@ static BOOL RecordExeRestore(HANDLE hProcess, HMODULE hModule, DETOUR_EXE_RESTOR
 #define IMAGE_NT_HEADERS_XX             IMAGE_NT_HEADERS64
 #define IMAGE_NT_OPTIONAL_HDR_MAGIC_XX  IMAGE_NT_OPTIONAL_HDR64_MAGIC
 #define IMAGE_ORDINAL_FLAG_XX           IMAGE_ORDINAL_FLAG64
-#define IMAGE_THUNK_DATAXX              IMAGE_THUNK_DATA64
-#define UPDATE_IMPORTS_XX               UpdateImports64
+#define IMAGE_THUNK_DATAXX           	  IMAGE_THUNK_DATA64
+#define UPDATE_IMPORTS_XX               UpdateImports64_Old
 #define DETOURS_BITS_XX                 64
 #include "uimports.cpp"
 #undef DETOUR_EXE_RESTORE_FIELD_XX
@@ -661,6 +736,535 @@ static BOOL UpdateFrom32To64(HANDLE hProcess, HMODULE hModule, WORD machine,
 }
 #endif // DETOURS_64BIT
 
+static BOOL UpdateImports32(HANDLE hProcess,
+    HMODULE hModule,
+    __in_ecount(nDlls) LPCSTR* plpDlls,
+    DWORD nDlls)
+{
+    BOOL fSucceeded = FALSE;
+    DWORD cbNew = 0;
+
+    BYTE* pbNew = NULL;
+    DWORD i;
+    SIZE_T cbRead;
+    DWORD n;
+
+    PBYTE pbModule = (PBYTE)hModule;
+
+    IMAGE_DOS_HEADER idh;
+    ZeroMemory(&idh, sizeof(idh));
+    if (!ReadProcessMemory(hProcess, pbModule, &idh, sizeof(idh), &cbRead)
+        || cbRead < sizeof(idh)) {
+
+        DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %d\n",
+            pbModule, pbModule + sizeof(idh), GetLastError()));
+
+    finish:
+        if (pbNew != NULL) {
+            delete[] pbNew;
+            pbNew = NULL;
+        }
+        return fSucceeded;
+    }
+
+    IMAGE_NT_HEADERS32 inh;
+    ZeroMemory(&inh, sizeof(inh));
+
+    if (!ReadProcessMemory(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), &cbRead)
+        || cbRead < sizeof(inh)) {
+        DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p) failed: %d\n",
+            pbModule + idh.e_lfanew,
+            pbModule + idh.e_lfanew + sizeof(inh),
+            GetLastError()));
+        goto finish;
+    }
+
+    if (inh.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        DETOUR_TRACE(("Wrong size image (%04x != %04x).\n",
+            inh.OptionalHeader.Magic, IMAGE_NT_OPTIONAL_HDR32_MAGIC));
+        SetLastError(ERROR_INVALID_BLOCK);
+        goto finish;
+    }
+
+    // Zero out the bound table so loader doesn't use it instead of our new table.
+    inh.BOUND_DIRECTORY.VirtualAddress = 0;
+    inh.BOUND_DIRECTORY.Size = 0;
+
+    // Find the size of the mapped file.
+    DWORD dwSec = idh.e_lfanew +
+        FIELD_OFFSET(IMAGE_NT_HEADERS32, OptionalHeader) +
+        inh.FileHeader.SizeOfOptionalHeader;
+
+    for (i = 0; i < inh.FileHeader.NumberOfSections; i++) {
+        IMAGE_SECTION_HEADER ish;
+        ZeroMemory(&ish, sizeof(ish));
+
+        if (!ReadProcessMemory(hProcess, pbModule + dwSec + sizeof(ish) * i, &ish,
+            sizeof(ish), &cbRead)
+            || cbRead < sizeof(ish)) {
+
+            DETOUR_TRACE(("ReadProcessMemory(ish@%p..%p) failed: %d\n",
+                pbModule + dwSec + sizeof(ish) * i,
+                pbModule + dwSec + sizeof(ish) * (i + 1),
+                GetLastError()));
+            goto finish;
+        }
+
+        DETOUR_TRACE(("ish[%d] : va=%08x sr=%d\n", i, ish.VirtualAddress, ish.SizeOfRawData));
+
+        // If the linker didn't suggest an IAT in the data directories, the
+        // loader will look for the section of the import directory to be used
+        // for this instead. Since we put out new IMPORT_DIRECTORY outside any
+        // section boundary, the loader will not find it. So we provide one
+        // explicitly to avoid the search.
+        //
+        if (inh.IAT_DIRECTORY.VirtualAddress == 0 &&
+            inh.IMPORT_DIRECTORY.VirtualAddress >= ish.VirtualAddress &&
+            inh.IMPORT_DIRECTORY.VirtualAddress < ish.VirtualAddress + ish.SizeOfRawData) {
+
+            inh.IAT_DIRECTORY.VirtualAddress = ish.VirtualAddress;
+            inh.IAT_DIRECTORY.Size = ish.SizeOfRawData;
+        }
+    }
+
+    DETOUR_TRACE(("     Imports: %p..%p\n",
+        (DWORD_PTR)pbModule + inh.IMPORT_DIRECTORY.VirtualAddress,
+        (DWORD_PTR)pbModule + inh.IMPORT_DIRECTORY.VirtualAddress +
+        inh.IMPORT_DIRECTORY.Size));
+
+    DWORD nOldDlls = inh.IMPORT_DIRECTORY.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    DWORD obRem = sizeof(IMAGE_IMPORT_DESCRIPTOR) * nDlls;
+    DWORD obOld = obRem + sizeof(IMAGE_IMPORT_DESCRIPTOR) * nOldDlls;
+    DWORD obTab = PadToDwordPtr(obOld);
+    DWORD obDll = obTab + sizeof(DWORD32) * 4 * nDlls;
+    DWORD obStr = obDll;
+    cbNew = obStr;
+    for (n = 0; n < nDlls; n++) {
+        cbNew += PadToDword((DWORD)strlen(plpDlls[n]) + 1);
+    }
+
+    _Analysis_assume_(cbNew >
+        sizeof(IMAGE_IMPORT_DESCRIPTOR) * (nDlls + nOldDlls)
+        + sizeof(DWORD_XX) * 4 * nDlls);
+    pbNew = new BYTE[cbNew];
+    if (pbNew == NULL) {
+        DETOUR_TRACE(("new BYTE [cbNew] failed.\n"));
+        goto finish;
+    }
+    ZeroMemory(pbNew, cbNew);
+
+    PBYTE pbBase = pbModule;
+    PBYTE pbNext = pbBase
+        + inh.OptionalHeader.BaseOfCode
+        + inh.OptionalHeader.SizeOfCode
+        + inh.OptionalHeader.SizeOfInitializedData
+        + inh.OptionalHeader.SizeOfUninitializedData;
+    if (pbBase < pbNext) {
+        pbBase = pbNext;
+    }
+    DETOUR_TRACE(("pbBase = %p\n", pbBase));
+
+    PBYTE pbNewIid = FindAndAllocateNearBase32(hProcess, pbModule, pbBase, cbNew);
+    if (pbNewIid == NULL) {
+        DETOUR_TRACE(("FindAndAllocateNearBase failed.\n"));
+        goto finish;
+    }
+
+    PIMAGE_IMPORT_DESCRIPTOR piid = (PIMAGE_IMPORT_DESCRIPTOR)pbNew;
+    IMAGE_THUNK_DATAXX* pt = NULL;
+
+    DWORD obBase = (DWORD)(pbNewIid - pbModule);
+    DWORD dwProtect = 0;
+
+    if (inh.IMPORT_DIRECTORY.VirtualAddress != 0) {
+        // Read the old import directory if it exists.
+        DETOUR_TRACE(("IMPORT_DIRECTORY perms=%x\n", dwProtect));
+
+        if (!ReadProcessMemory(hProcess,
+            pbModule + inh.IMPORT_DIRECTORY.VirtualAddress,
+            &piid[nDlls],
+            nOldDlls * sizeof(IMAGE_IMPORT_DESCRIPTOR), &cbRead)
+            || cbRead < nOldDlls * sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+
+            DETOUR_TRACE(("ReadProcessMemory(imports) failed: %d\n", GetLastError()));
+            goto finish;
+        }
+    }
+
+    for (n = 0; n < nDlls; n++) {
+        HRESULT hrRet = StringCchCopyA((char*)pbNew + obStr, cbNew - obStr, plpDlls[n]);
+        if (FAILED(hrRet)) {
+            DETOUR_TRACE(("StringCchCopyA failed: %d\n", GetLastError()));
+            goto finish;
+        }
+
+        // After copying the string, we patch up the size "??" bits if any.
+        hrRet = ReplaceOptionalSizeA((char*)pbNew + obStr,
+            cbNew - obStr,
+            DETOURS_STRINGIFY(DETOURS_BITS_XX));
+        if (FAILED(hrRet)) {
+            DETOUR_TRACE(("ReplaceOptionalSizeA failed: %d\n", GetLastError()));
+            goto finish;
+        }
+
+        DWORD nOffset = obTab + (sizeof(IMAGE_THUNK_DATA32) * (4 * n));
+        piid[n].OriginalFirstThunk = obBase + nOffset;
+
+        // We need 2 thunks for the import table and 2 thunks for the IAT.
+        // One for an ordinal import and one to mark the end of the list.
+        pt = ((IMAGE_THUNK_DATAXX*)(pbNew + nOffset));
+        pt[0].u1.Ordinal = IMAGE_ORDINAL_FLAG32 + 1;
+        pt[1].u1.Ordinal = 0;
+
+        nOffset = obTab + (sizeof(IMAGE_THUNK_DATA32) * ((4 * n) + 2));
+        piid[n].FirstThunk = obBase + nOffset;
+        pt = ((IMAGE_THUNK_DATAXX*)(pbNew + nOffset));
+        pt[0].u1.Ordinal = IMAGE_ORDINAL_FLAG32 + 1;
+        pt[1].u1.Ordinal = 0;
+        piid[n].TimeDateStamp = 0;
+        piid[n].ForwarderChain = 0;
+        piid[n].Name = obBase + obStr;
+
+        obStr += PadToDword((DWORD)strlen(plpDlls[n]) + 1);
+    }
+    _Analysis_assume_(obStr <= cbNew);
+
+#if 0
+    for (i = 0; i < nDlls + nOldDlls; i++) {
+        DETOUR_TRACE(("%8d. Look=%08x Time=%08x Fore=%08x Name=%08x Addr=%08x\n",
+            i,
+            piid[i].OriginalFirstThunk,
+            piid[i].TimeDateStamp,
+            piid[i].ForwarderChain,
+            piid[i].Name,
+            piid[i].FirstThunk));
+        if (piid[i].OriginalFirstThunk == 0 && piid[i].FirstThunk == 0) {
+            break;
+        }
+    }
+#endif
+
+    if (!WriteProcessMemory(hProcess, pbNewIid, pbNew, obStr, NULL)) {
+        DETOUR_TRACE(("WriteProcessMemory(iid) failed: %d\n", GetLastError()));
+        goto finish;
+    }
+
+    DETOUR_TRACE(("obBaseBef = %08x..%08x\n",
+        inh.IMPORT_DIRECTORY.VirtualAddress,
+        inh.IMPORT_DIRECTORY.VirtualAddress + inh.IMPORT_DIRECTORY.Size));
+    DETOUR_TRACE(("obBaseAft = %08x..%08x\n", obBase, obBase + obStr));
+
+    // In this case the file didn't have an import directory in first place,
+    // so we couldn't fix the missing IAT above. We still need to explicitly
+    // provide an IAT to prevent to loader from looking for one.
+    //
+    if (inh.IAT_DIRECTORY.VirtualAddress == 0) {
+        inh.IAT_DIRECTORY.VirtualAddress = obBase;
+        inh.IAT_DIRECTORY.Size = cbNew;
+    }
+
+    inh.IMPORT_DIRECTORY.VirtualAddress = obBase;
+    inh.IMPORT_DIRECTORY.Size = cbNew;
+
+    /////////////////////// Update the NT header for the new import directory.
+    //
+    if (!DetourVirtualProtectSameExecuteEx(hProcess, pbModule, inh.OptionalHeader.SizeOfHeaders,
+        PAGE_EXECUTE_READWRITE, &dwProtect)) {
+        DETOUR_TRACE(("VirtualProtectEx(inh) write failed: %d\n", GetLastError()));
+        goto finish;
+    }
+
+    inh.OptionalHeader.CheckSum = 0;
+
+    if (!WriteProcessMemory(hProcess, pbModule, &idh, sizeof(idh), NULL)) {
+        DETOUR_TRACE(("WriteProcessMemory(idh) failed: %d\n", GetLastError()));
+        goto finish;
+    }
+    DETOUR_TRACE(("WriteProcessMemory(idh:%p..%p)\n", pbModule, pbModule + sizeof(idh)));
+
+    if (!WriteProcessMemory(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), NULL)) {
+        DETOUR_TRACE(("WriteProcessMemory(inh) failed: %d\n", GetLastError()));
+        goto finish;
+    }
+    DETOUR_TRACE(("WriteProcessMemory(inh:%p..%p)\n",
+        pbModule + idh.e_lfanew,
+        pbModule + idh.e_lfanew + sizeof(inh)));
+
+    if (!VirtualProtectEx(hProcess, pbModule, inh.OptionalHeader.SizeOfHeaders,
+        dwProtect, &dwProtect)) {
+        DETOUR_TRACE(("VirtualProtectEx(idh) restore failed: %d\n", GetLastError()));
+        goto finish;
+    }
+
+    fSucceeded = TRUE;
+    goto finish;
+}
+
+static BOOL UpdateImports64(HANDLE hProcess,
+    DWORD64 hModule,
+    __in_ecount(nDlls) LPCSTR* plpDlls,
+    DWORD nDlls)
+{
+    BOOL fSucceeded = FALSE;
+    DWORD64 cbNew = 0;
+
+    BYTE* pbNew = NULL;
+    DWORD64 i;
+    SIZE_T cbRead;
+    DWORD64 n;
+
+    DWORD64 pbModule = (DWORD64)hModule;
+
+    IMAGE_DOS_HEADER idh;
+    ZeroMemory(&idh, sizeof(idh));
+    if (!yapi_dt::ReadProcessMemory64(hProcess, pbModule, &idh, sizeof(idh), &cbRead)
+        || cbRead < sizeof(idh)) {
+
+        DETOUR_TRACE(("ReadProcessMemory(idh@%p..%p) failed: %d\n",
+            pbModule, pbModule + sizeof(idh), GetLastError()));
+
+    finish:
+        if (pbNew != NULL) {
+            delete[] pbNew;
+            pbNew = NULL;
+        }
+        return fSucceeded;
+    }
+
+    IMAGE_NT_HEADERS64 inh;
+    ZeroMemory(&inh, sizeof(inh));
+
+    if (!yapi_dt::ReadProcessMemory64(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), &cbRead)
+        || cbRead < sizeof(inh)) {
+        DETOUR_TRACE(("ReadProcessMemory(inh@%p..%p) failed: %d\n",
+            pbModule + idh.e_lfanew,
+            pbModule + idh.e_lfanew + sizeof(inh),
+            GetLastError()));
+        goto finish;
+    }
+
+    if (inh.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        DETOUR_TRACE(("Wrong size image (%04x != %04x).\n",
+            inh.OptionalHeader.Magic, IMAGE_NT_OPTIONAL_HDR64_MAGIC));
+        SetLastError(ERROR_INVALID_BLOCK);
+        goto finish;
+    }
+
+    // Zero out the bound table so loader doesn't use it instead of our new table.
+    inh.BOUND_DIRECTORY.VirtualAddress = 0;
+    inh.BOUND_DIRECTORY.Size = 0;
+
+    // Find the size of the mapped file.
+    DWORD64 dwSec = idh.e_lfanew +
+        FIELD_OFFSET(IMAGE_NT_HEADERS64, OptionalHeader) +
+        inh.FileHeader.SizeOfOptionalHeader;
+
+    for (i = 0; i < inh.FileHeader.NumberOfSections; i++) {
+        IMAGE_SECTION_HEADER ish;
+        ZeroMemory(&ish, sizeof(ish));
+
+        if (!yapi_dt::ReadProcessMemory64(hProcess, pbModule + dwSec + sizeof(ish) * i, &ish,
+            sizeof(ish), &cbRead)
+            || cbRead < sizeof(ish)) {
+
+            DETOUR_TRACE(("ReadProcessMemory(ish@%p..%p) failed: %d\n",
+                pbModule + dwSec + sizeof(ish) * i,
+                pbModule + dwSec + sizeof(ish) * (i + 1),
+                GetLastError()));
+            goto finish;
+        }
+
+        DETOUR_TRACE(("ish[%d] : va=%08x sr=%d\n", i, ish.VirtualAddress, ish.SizeOfRawData));
+
+        // If the linker didn't suggest an IAT in the data directories, the
+        // loader will look for the section of the import directory to be used
+        // for this instead. Since we put out new IMPORT_DIRECTORY outside any
+        // section boundary, the loader will not find it. So we provide one
+        // explicitly to avoid the search.
+        //
+        if (inh.IAT_DIRECTORY.VirtualAddress == 0 &&
+            inh.IMPORT_DIRECTORY.VirtualAddress >= ish.VirtualAddress &&
+            inh.IMPORT_DIRECTORY.VirtualAddress < ish.VirtualAddress + ish.SizeOfRawData) {
+
+            inh.IAT_DIRECTORY.VirtualAddress = ish.VirtualAddress;
+            inh.IAT_DIRECTORY.Size = ish.SizeOfRawData;
+        }
+    }
+
+    DETOUR_TRACE(("     Imports: %p..%p\n",
+        (DWORD_PTR)pbModule + inh.IMPORT_DIRECTORY.VirtualAddress,
+        (DWORD_PTR)pbModule + inh.IMPORT_DIRECTORY.VirtualAddress +
+        inh.IMPORT_DIRECTORY.Size));
+
+    DWORD64 nOldDlls = inh.IMPORT_DIRECTORY.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    DWORD64 obRem = sizeof(IMAGE_IMPORT_DESCRIPTOR) * nDlls;
+    DWORD64 obOld = obRem + sizeof(IMAGE_IMPORT_DESCRIPTOR) * nOldDlls;
+    DWORD64 obTab = PadToDwordPtr(obOld);
+    DWORD64 obDll = obTab + sizeof(DWORD64) * 4 * nDlls;
+    DWORD64 obStr = obDll;
+    cbNew = obStr;
+    for (n = 0; n < nDlls; n++) {
+        cbNew += PadToDword((DWORD)strlen(plpDlls[n]) + 1);
+    }
+
+    _Analysis_assume_(cbNew >
+        sizeof(IMAGE_IMPORT_DESCRIPTOR) * (nDlls + nOldDlls)
+        + sizeof(DWORD64) * 4 * nDlls);
+    pbNew = new BYTE[cbNew];
+    if (pbNew == NULL) {
+        DETOUR_TRACE(("new BYTE [cbNew] failed.\n"));
+        goto finish;
+    }
+    ZeroMemory(pbNew, cbNew);
+
+    DWORD64 pbBase = pbModule;
+    DWORD64 pbNext = pbBase
+        + inh.OptionalHeader.BaseOfCode
+        + inh.OptionalHeader.SizeOfCode
+        + inh.OptionalHeader.SizeOfInitializedData
+        + inh.OptionalHeader.SizeOfUninitializedData;
+    if (pbBase < pbNext) {
+        pbBase = pbNext;
+    }
+    DETOUR_TRACE(("pbBase = %p\n", pbBase));
+
+    DWORD64 pbNewIid = FindAndAllocateNearBase64(hProcess, pbModule, pbBase, cbNew);
+    if (pbNewIid == NULL) {
+        DETOUR_TRACE(("FindAndAllocateNearBase failed.\n"));
+        goto finish;
+    }
+
+    PIMAGE_IMPORT_DESCRIPTOR piid = (PIMAGE_IMPORT_DESCRIPTOR)pbNew;
+    IMAGE_THUNK_DATA64* pt = NULL;
+
+    DWORD64 obBase = (DWORD64)(pbNewIid - pbModule);
+    DWORD dwProtect = 0;
+
+    if (inh.IMPORT_DIRECTORY.VirtualAddress != 0) {
+        // Read the old import directory if it exists.
+        DETOUR_TRACE(("IMPORT_DIRECTORY perms=%x\n", dwProtect));
+
+        if (!yapi_dt::ReadProcessMemory64(hProcess,
+            pbModule + inh.IMPORT_DIRECTORY.VirtualAddress,
+            &piid[nDlls],
+            nOldDlls * sizeof(IMAGE_IMPORT_DESCRIPTOR), &cbRead)
+            || cbRead < nOldDlls * sizeof(IMAGE_IMPORT_DESCRIPTOR)) {
+
+            DETOUR_TRACE(("ReadProcessMemory(imports) failed: %d\n", GetLastError()));
+            goto finish;
+        }
+    }
+
+    for (n = 0; n < nDlls; n++) {
+        HRESULT hrRet = StringCchCopyA((char*)pbNew + obStr, cbNew - obStr, plpDlls[n]);
+        if (FAILED(hrRet)) {
+            DETOUR_TRACE(("StringCchCopyA failed: %d\n", GetLastError()));
+            goto finish;
+        }
+
+        // After copying the string, we patch up the size "??" bits if any.
+        hrRet = ReplaceOptionalSizeA((char*)pbNew + obStr,
+            cbNew - obStr,
+            DETOURS_STRINGIFY(DETOURS_BITS_XX));
+        if (FAILED(hrRet)) {
+            DETOUR_TRACE(("ReplaceOptionalSizeA failed: %d\n", GetLastError()));
+            goto finish;
+        }
+
+        DWORD64 nOffset = obTab + (sizeof(IMAGE_THUNK_DATA64) * (4 * n));
+        piid[n].OriginalFirstThunk = obBase + nOffset;
+
+        // We need 2 thunks for the import table and 2 thunks for the IAT.
+        // One for an ordinal import and one to mark the end of the list.
+        pt = ((IMAGE_THUNK_DATA64*)(pbNew + nOffset));
+        pt[0].u1.Ordinal = IMAGE_ORDINAL_FLAG64 + 1;
+        pt[1].u1.Ordinal = 0;
+
+        nOffset = obTab + (sizeof(IMAGE_THUNK_DATA64) * ((4 * n) + 2));
+        piid[n].FirstThunk = obBase + nOffset;
+        pt = ((IMAGE_THUNK_DATA64*)(pbNew + nOffset));
+        pt[0].u1.Ordinal = IMAGE_ORDINAL_FLAG64 + 1;
+        pt[1].u1.Ordinal = 0;
+        piid[n].TimeDateStamp = 0;
+        piid[n].ForwarderChain = 0;
+        piid[n].Name = obBase + obStr;
+
+        obStr += PadToDword((DWORD)strlen(plpDlls[n]) + 1);
+    }
+    _Analysis_assume_(obStr <= cbNew);
+
+#if 0
+    for (i = 0; i < nDlls + nOldDlls; i++) {
+        DETOUR_TRACE(("%8d. Look=%08x Time=%08x Fore=%08x Name=%08x Addr=%08x\n",
+            i,
+            piid[i].OriginalFirstThunk,
+            piid[i].TimeDateStamp,
+            piid[i].ForwarderChain,
+            piid[i].Name,
+            piid[i].FirstThunk));
+        if (piid[i].OriginalFirstThunk == 0 && piid[i].FirstThunk == 0) {
+            break;
+        }
+    }
+#endif
+
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbNewIid, pbNew, obStr, NULL)) {
+        DETOUR_TRACE(("WriteProcessMemory(iid) failed: %d\n", GetLastError()));
+        goto finish;
+    }
+
+    DETOUR_TRACE(("obBaseBef = %08x..%08x\n",
+        inh.IMPORT_DIRECTORY.VirtualAddress,
+        inh.IMPORT_DIRECTORY.VirtualAddress + inh.IMPORT_DIRECTORY.Size));
+    DETOUR_TRACE(("obBaseAft = %08x..%08x\n", obBase, obBase + obStr));
+
+    // In this case the file didn't have an import directory in first place,
+    // so we couldn't fix the missing IAT above. We still need to explicitly
+    // provide an IAT to prevent to loader from looking for one.
+    //
+    if (inh.IAT_DIRECTORY.VirtualAddress == 0) {
+        inh.IAT_DIRECTORY.VirtualAddress = obBase;
+        inh.IAT_DIRECTORY.Size = cbNew;
+    }
+
+    inh.IMPORT_DIRECTORY.VirtualAddress = obBase;
+    inh.IMPORT_DIRECTORY.Size = cbNew;
+
+    /////////////////////// Update the NT header for the new import directory.
+    //
+    if (!DetourVirtualProtectSameExecuteEx64(hProcess, pbModule, inh.OptionalHeader.SizeOfHeaders,
+        PAGE_EXECUTE_READWRITE, &dwProtect)) {
+        DETOUR_TRACE(("VirtualProtectEx(inh) write failed: %d\n", GetLastError()));
+        goto finish;
+    }
+
+    inh.OptionalHeader.CheckSum = 0;
+
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbModule, &idh, sizeof(idh), NULL)) {
+        DETOUR_TRACE(("WriteProcessMemory(idh) failed: %d\n", GetLastError()));
+        goto finish;
+    }
+    DETOUR_TRACE(("WriteProcessMemory(idh:%p..%p)\n", pbModule, pbModule + sizeof(idh)));
+
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbModule + idh.e_lfanew, &inh, sizeof(inh), NULL)) {
+        DETOUR_TRACE(("WriteProcessMemory(inh) failed: %d\n", GetLastError()));
+        goto finish;
+    }
+    DETOUR_TRACE(("WriteProcessMemory(inh:%p..%p)\n",
+        pbModule + idh.e_lfanew,
+        pbModule + idh.e_lfanew + sizeof(inh)));
+
+    if (!yapi_dt::VirtualProtectEx64(hProcess, pbModule, inh.OptionalHeader.SizeOfHeaders,
+        dwProtect, &dwProtect)) {
+        DETOUR_TRACE(("VirtualProtectEx(idh) restore failed: %d\n", GetLastError()));
+        goto finish;
+    }
+
+    fSucceeded = TRUE;
+    goto finish;
+}
+
+
 typedef BOOL(WINAPI *LPFN_ISWOW64PROCESS)(HANDLE, PBOOL);
 
 static BOOL IsWow64ProcessHelper(HANDLE hProcess,
@@ -702,8 +1306,8 @@ BOOL WINAPI DetourUpdateProcessWithDll(_In_ HANDLE hProcess,
     //
     BOOL bIs32BitProcess;
     BOOL bIs64BitOS = FALSE;
-    HMODULE hModule = NULL;
-    HMODULE hLast = NULL;
+    DWORD64 hModule = NULL;
+    DWORD64 hLast = NULL;
 
     DETOUR_TRACE(("DetourUpdateProcessWithDll(%p,dlls=%lu)\n", hProcess, nDlls));
 
@@ -768,7 +1372,7 @@ BOOL WINAPI DetourUpdateProcessWithDll(_In_ HANDLE hProcess,
 }
 
 BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
-                                         _In_ HMODULE hModule,
+                                         _In_ DWORD64 hModule,
                                          _In_ BOOL bIs32BitProcess,
                                          _In_reads_(nDlls) LPCSTR *rlpDlls,
                                          _In_ DWORD nDlls)
@@ -840,19 +1444,15 @@ BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
 #if defined(DETOURS_32BIT)
     if (bIs32BitProcess) {
         // 32-bit native or 32-bit managed process on any platform.
-        if (!UpdateImports32(hProcess, hModule, rlpDlls, nDlls)) {
+        if (!UpdateImports32(hProcess, (HMODULE)hModule, rlpDlls, nDlls)) {
             return FALSE;
         }
     }
     else {
-        // 64-bit native or 64-bit managed process.
-        //
-        // Can't detour a 64-bit process with 32-bit code.
-        // Note: This happens for 32-bit PE binaries containing only
-        // manage code that have been marked as 64-bit ready.
-        //
-        SetLastError(ERROR_INVALID_HANDLE);
+        // 32-bit native or 32-bit managed process on any platform.
+        if (!UpdateImports64(hProcess, hModule, rlpDlls, nDlls)) {
         return FALSE;
+    }
     }
 #elif defined(DETOURS_64BIT)
     if (bIs32BitProcess) {
@@ -862,10 +1462,10 @@ BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
             }
         }
         else {
-            // Can't detour a 32-bit process with 64-bit code.
-            SetLastError(ERROR_INVALID_HANDLE);
-            return FALSE;
-        }
+        // Can't detour a 32-bit process with 64-bit code.
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
     }
     else {
         // 64-bit native or 64-bit managed process on any platform.
@@ -885,17 +1485,17 @@ BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
         clr.Flags &= ~COMIMAGE_FLAGS_ILONLY;    // Clear the IL_ONLY flag.
 
         DWORD dwProtect;
-        if (!DetourVirtualProtectSameExecuteEx(hProcess, der.pclr, sizeof(clr), PAGE_READWRITE, &dwProtect)) {
+        if (!DetourVirtualProtectSameExecuteEx64(hProcess, der.pclr, sizeof(clr), PAGE_READWRITE, &dwProtect)) {
             DETOUR_TRACE(("VirtualProtectEx(clr) write failed: %lu\n", GetLastError()));
             return FALSE;
         }
 
-        if (!WriteProcessMemory(hProcess, der.pclr, &clr, sizeof(clr), NULL)) {
+        if (!yapi_dt::WriteProcessMemory64(hProcess, der.pclr, &clr, sizeof(clr), NULL)) {
             DETOUR_TRACE(("WriteProcessMemory(clr) failed: %lu\n", GetLastError()));
             return FALSE;
         }
 
-        if (!VirtualProtectEx(hProcess, der.pclr, sizeof(clr), dwProtect, &dwProtect)) {
+        if (!yapi_dt::VirtualProtectEx64(hProcess, der.pclr, sizeof(clr), dwProtect, &dwProtect)) {
             DETOUR_TRACE(("VirtualProtectEx(clr) restore failed: %lu\n", GetLastError()));
             return FALSE;
         }
@@ -1063,7 +1663,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
                      sizeof(DETOUR_SECTION_RECORD) +
                      cbData);
 
-    PBYTE pbBase = (PBYTE)VirtualAllocEx(hProcess, NULL, cbTotal,
+    DWORD64 pbBase = (DWORD64)yapi_dt::VirtualAllocEx64(hProcess, NULL, cbTotal,
                                          MEM_COMMIT, PAGE_READWRITE);
     if (pbBase == NULL) {
         DETOUR_TRACE(("VirtualAllocEx(%lu) failed: %lu\n", cbTotal, GetLastError()));
@@ -1075,7 +1675,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     // so DetourFreePayload can use "DetourGetContainingModule(Payload pointer)" to get the above "pbBase" pointer,
     // pbBase: the memory block allocated by VirtualAllocEx will be released in DetourFreePayload by VirtualFree.
 
-    PBYTE pbTarget = pbBase;
+    DWORD64 pbTarget = pbBase;
     IMAGE_DOS_HEADER idh;
     IMAGE_NT_HEADERS inh;
     IMAGE_SECTION_HEADER ish;
@@ -1086,7 +1686,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     ZeroMemory(&idh, sizeof(idh));
     idh.e_magic = IMAGE_DOS_SIGNATURE;
     idh.e_lfanew = sizeof(idh);
-    if (!WriteProcessMemory(hProcess, pbTarget, &idh, sizeof(idh), &cbWrote) ||
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &idh, sizeof(idh), &cbWrote) ||
         cbWrote != sizeof(idh)) {
         DETOUR_TRACE(("WriteProcessMemory(idh) failed: %lu\n", GetLastError()));
         return NULL;
@@ -1099,7 +1699,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     inh.FileHeader.Characteristics = IMAGE_FILE_DLL;
     inh.FileHeader.NumberOfSections = 1;
     inh.OptionalHeader.Magic = IMAGE_NT_OPTIONAL_HDR_MAGIC;
-    if (!WriteProcessMemory(hProcess, pbTarget, &inh, sizeof(inh), &cbWrote) ||
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &inh, sizeof(inh), &cbWrote) ||
         cbWrote != sizeof(inh)) {
         return NULL;
     }
@@ -1111,7 +1711,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     ish.SizeOfRawData = (sizeof(DETOUR_SECTION_HEADER) +
                          sizeof(DETOUR_SECTION_RECORD) +
                          cbData);
-    if (!WriteProcessMemory(hProcess, pbTarget, &ish, sizeof(ish), &cbWrote) ||
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &ish, sizeof(ish), &cbWrote) ||
         cbWrote != sizeof(ish)) {
         return NULL;
     }
@@ -1124,7 +1724,7 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     dsh.cbDataSize = (sizeof(DETOUR_SECTION_HEADER) +
                       sizeof(DETOUR_SECTION_RECORD) +
                       cbData);
-    if (!WriteProcessMemory(hProcess, pbTarget, &dsh, sizeof(dsh), &cbWrote) ||
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &dsh, sizeof(dsh), &cbWrote) ||
         cbWrote != sizeof(dsh)) {
         return NULL;
     }
@@ -1134,13 +1734,13 @@ PVOID WINAPI DetourCopyPayloadToProcessEx(_In_ HANDLE hProcess,
     dsr.cbBytes = cbData + sizeof(DETOUR_SECTION_RECORD);
     dsr.nReserved = 0;
     dsr.guid = rguid;
-    if (!WriteProcessMemory(hProcess, pbTarget, &dsr, sizeof(dsr), &cbWrote) ||
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, &dsr, sizeof(dsr), &cbWrote) ||
         cbWrote != sizeof(dsr)) {
         return NULL;
     }
     pbTarget += sizeof(dsr);
 
-    if (!WriteProcessMemory(hProcess, pbTarget, pvData, cbData, &cbWrote) ||
+    if (!yapi_dt::WriteProcessMemory64(hProcess, pbTarget, pvData, cbData, &cbWrote) ||
         cbWrote != cbData) {
         return NULL;
     }

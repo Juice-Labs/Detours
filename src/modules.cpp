@@ -884,28 +884,28 @@ BOOL WINAPI DetourRestoreAfterWithEx(_In_reads_bytes_(cbData) PVOID pvData,
         fUpdated32To64 = TRUE;
     }
 
-    if (DetourVirtualProtectSameExecute(pder->pidh, pder->cbidh,
+    if (DetourVirtualProtectSameExecute((PVOID)pder->pidh, pder->cbidh,
                                         PAGE_EXECUTE_READWRITE, &dwPermIdh)) {
-        if (DetourVirtualProtectSameExecute(pder->pinh, pder->cbinh,
+        if (DetourVirtualProtectSameExecute((PVOID)pder->pinh, pder->cbinh,
                                             PAGE_EXECUTE_READWRITE, &dwPermInh)) {
 
-            CopyMemory(pder->pidh, &pder->idh, pder->cbidh);
-            CopyMemory(pder->pinh, &pder->inh, pder->cbinh);
+            CopyMemory((PVOID)pder->pidh, &pder->idh, pder->cbidh);
+            CopyMemory((PVOID)pder->pinh, &pder->inh, pder->cbinh);
 
             if (pder->pclr != NULL && !fUpdated32To64) {
-                if (DetourVirtualProtectSameExecute(pder->pclr, pder->cbclr,
+                if (DetourVirtualProtectSameExecute((PVOID)pder->pclr, pder->cbclr,
                                                     PAGE_EXECUTE_READWRITE, &dwPermClr)) {
-                    CopyMemory(pder->pclr, &pder->clr, pder->cbclr);
-                    VirtualProtect(pder->pclr, pder->cbclr, dwPermClr, &dwIgnore);
+                    CopyMemory((PVOID)pder->pclr, &pder->clr, pder->cbclr);
+                    VirtualProtect((PVOID)pder->pclr, pder->cbclr, dwPermClr, &dwIgnore);
                     fSucceeded = TRUE;
                 }
             }
             else {
                 fSucceeded = TRUE;
             }
-            VirtualProtect(pder->pinh, pder->cbinh, dwPermInh, &dwIgnore);
+            VirtualProtect((PVOID)pder->pinh, pder->cbinh, dwPermInh, &dwIgnore);
         }
-        VirtualProtect(pder->pidh, pder->cbidh, dwPermIdh, &dwIgnore);
+        VirtualProtect((PVOID)pder->pidh, pder->cbidh, dwPermIdh, &dwIgnore);
     }
     // Delete the payload after successful recovery to prevent repeated restore
     if (fSucceeded) {

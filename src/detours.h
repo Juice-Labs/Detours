@@ -438,9 +438,9 @@ typedef struct _DETOUR_EXE_RESTORE
     DWORD               cbinh;
     DWORD               cbclr;
 
-    PBYTE               pidh;
-    PBYTE               pinh;
-    PBYTE               pclr;
+    DWORD64             pidh;
+    DWORD64             pinh;
+    DWORD64             pclr;
 
     IMAGE_DOS_HEADER    idh;
     union {
@@ -467,7 +467,7 @@ C_ASSERT(sizeof(IMAGE_NT_HEADERS64) == 0x108);
 #endif
 
 // The size can change, but assert for clarity due to the muddying #ifdefs.
-#ifdef _WIN64
+#if 1
 C_ASSERT(sizeof(DETOUR_EXE_RESTORE) == 0x688);
 #else
 C_ASSERT(sizeof(DETOUR_EXE_RESTORE) == 0x678);
@@ -828,7 +828,7 @@ BOOL WINAPI DetourUpdateProcessWithDll(_In_ HANDLE hProcess,
                                        _In_ DWORD nDlls);
 
 BOOL WINAPI DetourUpdateProcessWithDllEx(_In_ HANDLE hProcess,
-                                         _In_ HMODULE hImage,
+                                         _In_ DWORD64 hImage,
                                          _In_ BOOL bIs32Bit,
                                          _In_reads_(nDlls) LPCSTR *rlpDlls,
                                          _In_ DWORD nDlls);
@@ -1192,6 +1192,9 @@ DETOUR_OFFLINE_LIBRARY(IA64)
 //
 // Helpers for manipulating page protection.
 //
+
+DWORD DetourPageProtectAdjustExecute(_In_  DWORD dwOldProtect,
+    _In_  DWORD dwNewProtect);
 
 _Success_(return != FALSE)
 BOOL WINAPI DetourVirtualProtectSameExecuteEx(_In_  HANDLE hProcess,

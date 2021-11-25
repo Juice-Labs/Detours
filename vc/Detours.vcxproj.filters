@@ -374,6 +374,9 @@
     <ClInclude Include="..\samples\findfunc\target.h">
       <Filter>samples\findfunc</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\yapi.hpp">
+      <Filter>src</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="..\samples\tracebld\Makefile">

@@ -14,6 +14,7 @@
 #error detours.h version mismatch
 #endif
 
+#if 0
 // UpdateImports32 aka UpdateImports64
 static BOOL UPDATE_IMPORTS_XX(HANDLE hProcess,
                               HMODULE hModule,
@@ -331,3 +332,4 @@ static BOOL UPDATE_IMPORTS_XX(HANDLE hProcess,
     fSucceeded = TRUE;
     goto finish;
 }
+#endif

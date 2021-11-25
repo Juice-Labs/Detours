@@ -2525,7 +2525,7 @@ LONG WINAPI DetourDetach(_Inout_ PVOID *ppPointer,
 
 C_ASSERT((DETOUR_PAGE_NO_EXECUTE_ALL << 4) == DETOUR_PAGE_EXECUTE_ALL);
 
-static DWORD DetourPageProtectAdjustExecute(_In_  DWORD dwOldProtect,
+DWORD DetourPageProtectAdjustExecute(_In_  DWORD dwOldProtect,
                                             _In_  DWORD dwNewProtect)
 //  Copy EXECUTE from dwOldProtect to dwNewProtect.
 {
